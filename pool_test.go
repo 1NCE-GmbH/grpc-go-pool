@@ -235,7 +235,7 @@ func TestPoolClose(t *testing.T) {
 
 	_, err = p.Get(context.Background())
 	if err != ErrClosed {
-		t.Errorf("Closed pool availability is not zero")
+		t.Errorf("Closed pool returned unexpected error")
 	}
 }
 
