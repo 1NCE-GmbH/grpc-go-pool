@@ -102,7 +102,7 @@ func NewWithContext(ctx context.Context, factory FactoryWithContext, init, capac
 	return p, nil
 }
 
-func (p *Pool) getClients() chan ClientConn {
+func (p *Pool) getClients() <-chan ClientConn {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -134,6 +134,19 @@ func (p *Pool) Close() {
 // IsClosed returns true if the client pool is closed.
 func (p *Pool) IsClosed() bool {
 	return p == nil || p.getClients() == nil
+}
+
+// interlnal method to put clients into pool
+func (p *Pool) put(client ClientConn) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	select {
+	case p.clients <- client:
+		return nil
+	default:
+		return ErrFullPool
+	}
 }
 
 // Get will return the next available client. If capacity
@@ -173,9 +186,9 @@ func (p *Pool) Get(ctx context.Context) (*ClientConn, error) {
 		if err != nil {
 			// If there was an error, we want to put back a placeholder
 			// client in the channel
-			clients <- ClientConn{
+			go p.put(ClientConn{
 				pool: p,
-			}
+			})
 		}
 		// This is a new connection, reset its initiated time
 		wrapper.timeInitiated = time.Now()
@@ -226,11 +239,8 @@ func (c *ClientConn) Close() error {
 	} else {
 		wrapper.timeInitiated = c.timeInitiated
 	}
-	select {
-	case c.pool.clients <- wrapper:
-		// All good
-	default:
-		return ErrFullPool
+	if err := c.pool.put(wrapper); err != nil {
+		return err
 	}
 
 	c.ClientConn = nil // Mark as closed
@@ -242,7 +252,7 @@ func (p *Pool) Capacity() int {
 	if p.IsClosed() {
 		return 0
 	}
-	return cap(p.clients)
+	return cap(p.getClients())
 }
 
 // Available returns the number of currently unused clients
@@ -250,5 +260,5 @@ func (p *Pool) Available() int {
 	if p.IsClosed() {
 		return 0
 	}
-	return len(p.clients)
+	return len(p.getClients())
 }
