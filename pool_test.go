@@ -2,6 +2,7 @@ package grpcpool
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -174,7 +175,29 @@ func TestMaxLifeDuration(t *testing.T) {
 	if count > 1 {
 		t.Errorf("Dial function has been called multiple times")
 	}
+}
 
+func TestIdleTimeout(t *testing.T) {
+	// Let's test idle timeout for connection laying in the pool
+	// Call Get 3 times. 2 of them will happen before idle timeout, one after. Connection should be created 2 times total
+	count := 0
+	p, err := New(func() (*grpc.ClientConn, error) {
+		count++
+		return grpc.Dial("example.com", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}, 1, 1, time.Millisecond)
+	if err != nil {
+		t.Errorf("The pool returned an error: %s", err.Error())
+	}
+	c, _ := p.Get(context.Background())
+	c.Close()
+	c, _ = p.Get(context.Background())
+	c.Close()
+	time.Sleep(10 * time.Millisecond)
+	c, _ = p.Get(context.Background())
+	c.Close()
+	if count != 2 {
+		t.Errorf("Dial function has been called only %v times, expected 2", count)
+	}
 }
 
 func TestPoolClose(t *testing.T) {
@@ -200,6 +223,19 @@ func TestPoolClose(t *testing.T) {
 
 	if cc.GetState() != connectivity.Shutdown {
 		t.Errorf("Returned connection was not closed, underlying connection is not in shutdown state")
+	}
+
+	if p.Capacity() != 0 {
+		t.Errorf("Closed pool capacity is not zero")
+	}
+
+	if p.Available() != 0 {
+		t.Errorf("Closed pool availability is not zero")
+	}
+
+	_, err = p.Get(context.Background())
+	if err != ErrClosed {
+		t.Errorf("Closed pool availability is not zero")
 	}
 }
 
@@ -298,4 +334,85 @@ func TestGetContextFactoryTimeout(t *testing.T) {
 	if err != context.DeadlineExceeded {
 		t.Errorf("Returned error was not context.DeadlineExceeded, but the context was timed out before the Get invocation")
 	}
+}
+
+func TestNilPtr(t *testing.T) {
+	p, err := New(func() (*grpc.ClientConn, error) {
+		return grpc.Dial("example.com", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}, 1, 1, 0)
+
+	if err != nil {
+		t.Errorf("The pool returned an error: %s", err.Error())
+	}
+
+	c, _ := p.Get(context.Background())
+	c.Unhealthy() // suppress linter warning before assigning to nil
+
+	// after setting pointers to nil funxtions should return, no crash should be triggered
+	p = nil
+	p.Get(context.Background())
+	p.getClients()
+	p.put(nil)
+	p.IsClosed()
+	p.Available()
+	p.Capacity()
+	p.Close()
+
+	c = nil
+	c.Unhealthy()
+	c.Close()
+}
+
+// tun Racing tests with `-race` flag
+func TestConnRacing(t *testing.T) {
+	p, err := New(func() (*grpc.ClientConn, error) {
+		return grpc.Dial("example.com", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}, 1, 1, 0)
+
+	if err != nil {
+		t.Errorf("The pool returned an error: %s", err.Error())
+	}
+
+	var wg sync.WaitGroup
+	const iterations = 10
+
+	// Attempt to close same connection in different threads
+	conn, _ := p.Get(context.Background())
+	for i := 0; i < iterations; i++ {
+		wg.Add(1)
+		go conn.Close()
+		wg.Done()
+	}
+	wg.Wait()
+
+	// Check racing condintion with Pool and Connection close
+	conn, _ = p.Get(context.Background())
+	go p.Close()
+	go conn.Close()
+}
+
+func TestPoolRacing(t *testing.T) {
+	var wg sync.WaitGroup
+	const iterations = 1000
+
+	for i := 0; i < iterations; i++ {
+		wg.Add(1)
+		p, err := New(func() (*grpc.ClientConn, error) {
+			return grpc.Dial("example.com", grpc.WithTransportCredentials(insecure.NewCredentials()))
+		}, 1, 1, 0)
+
+		if err != nil {
+			t.Errorf("The pool returned an error: %s", err.Error())
+		}
+
+		// deliberately call multiple Close commands to force race
+		conn, _ := p.Get(context.Background())
+		go p.Close()
+		go p.Close()
+		go conn.Close()
+		go conn.Close()
+
+		wg.Done()
+	}
+	wg.Wait()
 }

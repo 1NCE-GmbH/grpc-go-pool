@@ -31,7 +31,7 @@ type FactoryWithContext func(context.Context) (*grpc.ClientConn, error)
 
 // Pool is the grpc client pool
 type Pool struct {
-	clients         chan ClientConn
+	clients         chan *ClientConn
 	factory         FactoryWithContext
 	idleTimeout     time.Duration
 	maxLifeDuration time.Duration
@@ -45,6 +45,7 @@ type ClientConn struct {
 	timeUsed      time.Time
 	timeInitiated time.Time
 	unhealthy     bool
+	mu            sync.Mutex
 }
 
 // New creates a new clients pool with the given initial and maximum capacity,
@@ -73,7 +74,7 @@ func NewWithContext(ctx context.Context, factory FactoryWithContext, init, capac
 		init = capacity
 	}
 	p := &Pool{
-		clients:     make(chan ClientConn, capacity),
+		clients:     make(chan *ClientConn, capacity),
 		factory:     factory,
 		idleTimeout: idleTimeout,
 	}
@@ -86,7 +87,7 @@ func NewWithContext(ctx context.Context, factory FactoryWithContext, init, capac
 			return nil, err
 		}
 
-		p.clients <- ClientConn{
+		p.clients <- &ClientConn{
 			ClientConn:    c,
 			pool:          p,
 			timeUsed:      time.Now(),
@@ -95,14 +96,18 @@ func NewWithContext(ctx context.Context, factory FactoryWithContext, init, capac
 	}
 	// Fill the rest of the pool with empty clients
 	for i := 0; i < capacity-init; i++ {
-		p.clients <- ClientConn{
+		p.clients <- &ClientConn{
 			pool: p,
 		}
 	}
 	return p, nil
 }
 
-func (p *Pool) getClients() <-chan ClientConn {
+func (p *Pool) getClients() <-chan *ClientConn {
+	if p == nil {
+		return nil
+	}
+
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -113,6 +118,10 @@ func (p *Pool) getClients() <-chan ClientConn {
 // You can call Close while there are outstanding clients.
 // The pool channel is then closed, and Get will not be allowed anymore
 func (p *Pool) Close() {
+	if p == nil {
+		return
+	}
+
 	p.mu.Lock()
 	clients := p.clients
 	p.clients = nil
@@ -137,7 +146,11 @@ func (p *Pool) IsClosed() bool {
 }
 
 // interlnal method to put clients into pool
-func (p *Pool) put(client ClientConn) error {
+func (p *Pool) put(client *ClientConn) error {
+	if p == nil {
+		return ErrClosed
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -159,9 +172,7 @@ func (p *Pool) Get(ctx context.Context) (*ClientConn, error) {
 		return nil, ErrClosed
 	}
 
-	wrapper := ClientConn{
-		pool: p,
-	}
+	var wrapper *ClientConn
 	select {
 	case wrapper = <-clients:
 		// All good
@@ -186,7 +197,7 @@ func (p *Pool) Get(ctx context.Context) (*ClientConn, error) {
 		if err != nil {
 			// If there was an error, we want to put back a placeholder
 			// client in the channel
-			go p.put(ClientConn{
+			go p.put(&ClientConn{
 				pool: p,
 			})
 		}
@@ -194,13 +205,19 @@ func (p *Pool) Get(ctx context.Context) (*ClientConn, error) {
 		wrapper.timeInitiated = time.Now()
 	}
 
-	return &wrapper, err
+	return wrapper, err
 }
 
 // Unhealthy marks the client conn as unhealthy, so that the connection
 // gets reset when closed
 func (c *ClientConn) Unhealthy() {
+	if c == nil {
+		return
+	}
+
+	c.mu.Lock()
 	c.unhealthy = true
+	c.mu.Unlock()
 }
 
 // Close returns a ClientConn to the pool. It is safe to call multiple time,
@@ -209,6 +226,10 @@ func (c *ClientConn) Close() error {
 	if c == nil {
 		return nil
 	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.ClientConn == nil {
 		return ErrAlreadyClosed
 	}
@@ -223,12 +244,12 @@ func (c *ClientConn) Close() error {
 	// time, if it's in the past it's too old
 	maxDuration := c.pool.maxLifeDuration
 	if maxDuration > 0 && c.timeInitiated.Add(maxDuration).Before(time.Now()) {
-		c.Unhealthy()
+		c.unhealthy = true
 	}
 
 	// We're cloning the wrapper so we can set ClientConn to nil in the one
 	// used by the user
-	wrapper := ClientConn{
+	wrapper := &ClientConn{
 		pool:       c.pool,
 		ClientConn: c.ClientConn,
 		timeUsed:   time.Now(),
@@ -240,7 +261,7 @@ func (c *ClientConn) Close() error {
 		wrapper.timeInitiated = c.timeInitiated
 	}
 	if err := c.pool.put(wrapper); err != nil {
-		return err
+		return err // TODO UT
 	}
 
 	c.ClientConn = nil // Mark as closed
