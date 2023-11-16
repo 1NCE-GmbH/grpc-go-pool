@@ -273,7 +273,7 @@ func TestGetContextFactoryTimeout(t *testing.T) {
 			return nil, ctx.Err()
 
 		// wait for the deadline to pass
-		case <-time.After(time.Millisecond):
+		case <-time.After(100 * time.Millisecond):
 			return grpc.Dial("example.com", grpc.WithTransportCredentials(insecure.NewCredentials()))
 		}
 
@@ -291,7 +291,7 @@ func TestGetContextFactoryTimeout(t *testing.T) {
 	c.Unhealthy()
 	c.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Microsecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()
 
 	_, err = p.Get(ctx)
