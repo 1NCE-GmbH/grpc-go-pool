@@ -261,7 +261,7 @@ func (c *ClientConn) Close() error {
 		wrapper.timeInitiated = c.timeInitiated
 	}
 	if err := c.pool.put(wrapper); err != nil {
-		return err // TODO UT
+		return err
 	}
 
 	c.ClientConn = nil // Mark as closed
