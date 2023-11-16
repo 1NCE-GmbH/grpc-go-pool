@@ -95,6 +95,36 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestCapacity(t *testing.T) {
+	// Assign negative capacity, test that it is changed to 1
+	p, err := New(func() (*grpc.ClientConn, error) {
+		return grpc.Dial("example.com", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}, -1, -2, 0)
+	if err != nil {
+		t.Errorf("The pool returned an error: %s", err.Error())
+	}
+	if a := p.Available(); a != 1 {
+		t.Errorf("The pool available was %d but should be 1", a)
+	}
+	if a := p.Capacity(); a != 1 {
+		t.Errorf("The pool capacity was %d but should be 1", a)
+	}
+
+	// Assing more initial connections than capacity, test that it is changed to cap limit
+	p, err = New(func() (*grpc.ClientConn, error) {
+		return grpc.Dial("example.com", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}, 100, 2, 0)
+	if err != nil {
+		t.Errorf("The pool returned an error: %s", err.Error())
+	}
+	if a := p.Available(); a != 2 {
+		t.Errorf("The pool available was %d but should be 2", a)
+	}
+	if a := p.Capacity(); a != 2 {
+		t.Errorf("The pool capacity was %d but should be 2", a)
+	}
+}
+
 func TestTimeout(t *testing.T) {
 	p, err := New(func() (*grpc.ClientConn, error) {
 		return grpc.Dial("example.com", grpc.WithTransportCredentials(insecure.NewCredentials()))
