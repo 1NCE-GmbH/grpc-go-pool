@@ -378,7 +378,7 @@ func TestNilPtr(t *testing.T) {
 	c, _ := p.Get(context.Background())
 	c.Unhealthy() // suppress linter warning before assigning to nil
 
-	// after setting pointers to nil funxtions should return, no crash should be triggered
+	// after setting pointers to nil functions should return, no crash should be triggered
 	p = nil
 	p.Get(context.Background())
 	p.getClients()
