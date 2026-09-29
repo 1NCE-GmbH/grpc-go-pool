@@ -269,6 +269,99 @@ func TestPoolClose(t *testing.T) {
 	}
 }
 
+// TestPoolCloseConcurrentGet checks that no underlying connection is leaked
+// when Get races with Close, whichever way the race is won: Get can still
+// receive a live wrapper while Close is draining the channel, and the pool can
+// close after Get handed a connection to the caller
+func TestPoolCloseConcurrentGet(t *testing.T) {
+	const capacity = 8
+
+	var (
+		mu    sync.Mutex
+		conns []*grpc.ClientConn
+	)
+	p, err := New(func() (*grpc.ClientConn, error) {
+		cc, err := grpc.Dial("example.com", grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return nil, err
+		}
+		mu.Lock()
+		conns = append(conns, cc)
+		mu.Unlock()
+		return cc, nil
+	}, capacity, capacity, 0)
+	if err != nil {
+		t.Fatalf("The pool returned an error: %s", err.Error())
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < capacity; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c, err := p.Get(context.Background())
+			if err != nil {
+				return
+			}
+			// The pool may close before we hand the client back, in which case
+			// Close reports ErrClosed. Either way the conn must not leak
+			if err := c.Close(); err != nil && err != ErrClosed {
+				t.Errorf("Close returned an unexpected error: %s", err.Error())
+			}
+		}()
+	}
+	p.Close()
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	for i, cc := range conns {
+		if cc.GetState() != connectivity.Shutdown {
+			t.Errorf("Connection %d leaked, it is in state %s instead of shutdown", i, cc.GetState())
+		}
+	}
+}
+
+// TestPoolCloseWhileGetBlocked checks the other way Get can observe a close:
+// with the pool fully checked out, Get blocks on the receive, and closing the
+// channel wakes it with a nil wrapper rather than a client
+func TestPoolCloseWhileGetBlocked(t *testing.T) {
+	const capacity = 4
+
+	p, err := New(func() (*grpc.ClientConn, error) {
+		return grpc.Dial("example.com", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}, capacity, capacity, 0)
+	if err != nil {
+		t.Fatalf("The pool returned an error: %s", err.Error())
+	}
+
+	// Check out the whole pool, so that any further Get has to block
+	for i := 0; i < capacity; i++ {
+		if _, err := p.Get(context.Background()); err != nil {
+			t.Fatalf("Get returned an error: %s", err.Error())
+		}
+	}
+
+	var started, wg sync.WaitGroup
+	for i := 0; i < capacity; i++ {
+		started.Add(1)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			started.Done()
+			if _, err := p.Get(context.Background()); err != ErrClosed {
+				t.Errorf("Get on a closed pool returned %v, expected ErrClosed", err)
+			}
+		}()
+	}
+
+	// Let the goroutines reach the blocking receive before closing the pool
+	started.Wait()
+	time.Sleep(50 * time.Millisecond)
+	p.Close()
+	wg.Wait()
+}
+
 func TestContextCancelation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
