@@ -180,6 +180,12 @@ func (p *Pool) Get(ctx context.Context) (*ClientConn, error) {
 		return nil, ErrTimeout // it would better returns ctx.Err()
 	}
 
+	// A concurrent Close closes the clients channel, and a receive on a closed
+	// channel yields a nil wrapper instead of blocking.
+	if wrapper == nil {
+		return nil, ErrClosed
+	}
+
 	// If the wrapper was idle too long, close the connection and create a new
 	// one. It's safe to assume that there isn't any newer client as the client
 	// we fetched is the first in the channel
