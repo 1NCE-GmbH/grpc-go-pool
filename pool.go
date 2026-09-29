@@ -154,6 +154,10 @@ func (p *Pool) put(client *ClientConn) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	if p.clients == nil {
+		return ErrClosed
+	}
+
 	select {
 	case p.clients <- client:
 		return nil
@@ -183,6 +187,17 @@ func (p *Pool) Get(ctx context.Context) (*ClientConn, error) {
 	// A concurrent Close closes the clients channel, and a receive on a closed
 	// channel yields a nil wrapper instead of blocking.
 	if wrapper == nil {
+		return nil, ErrClosed
+	}
+
+	// Close drains the channel concurrently with the receive above, so a live
+	// wrapper can still come out of it after the pool was closed. That wrapper
+	// can never be given back to the pool, so close it here instead of handing
+	// out a connection that the caller cannot release
+	if p.IsClosed() {
+		if wrapper.ClientConn != nil {
+			wrapper.ClientConn.Close()
+		}
 		return nil, ErrClosed
 	}
 
@@ -239,9 +254,6 @@ func (c *ClientConn) Close() error {
 	if c.ClientConn == nil {
 		return ErrAlreadyClosed
 	}
-	if c.pool.IsClosed() {
-		return ErrClosed
-	}
 	// If the wrapper connection has become too old, we want to recycle it. To
 	// clarify the logic: if the sum of the initialization time and the max
 	// duration is before Now(), it means the initialization is so old adding
@@ -267,6 +279,15 @@ func (c *ClientConn) Close() error {
 		wrapper.timeInitiated = c.timeInitiated
 	}
 	if err := c.pool.put(wrapper); err != nil {
+		// put reports ErrClosed while holding the pool lock, so the pool is
+		// definitively closed and nothing will ever drain this connection.
+		// Close it here rather than leaking it
+		if err == ErrClosed {
+			if wrapper.ClientConn != nil {
+				wrapper.ClientConn.Close()
+			}
+			c.ClientConn = nil // Mark as closed
+		}
 		return err
 	}
 
